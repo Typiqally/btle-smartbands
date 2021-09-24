@@ -6,18 +6,18 @@ use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 use async_std::task;
-use futures::stream::{Stream, StreamExt};
+use futures::stream::{StreamExt};
 use btleplug::api::{Central, Manager as _, Peripheral as _};
 use btleplug::platform::{Manager};
 use uuid::Uuid;
 
-fn u8asu16be(src: [u8; 2]) -> u16 {
-    return ((src[1] as u16) << 8) | src[0] as u16;
+fn u8asu16be(data: [u8; 2]) -> u16 {
+    return ((data[1] as u16) << 8) | data[0] as u16;
 }
 
-fn crc16(src: &[u8]) -> u16 {
+fn crc16(data: &Vec<u8>) -> u16 {
     let mut crc: u16 = 0xffff;
-    for b in src {
+    for b in data.iter() {
         crc ^= (*b as u16) << 8;
         for _ in 0..8 {
             if crc & 0x8000 != 0 {
@@ -28,6 +28,29 @@ fn crc16(src: &[u8]) -> u16 {
         }
     }
     return crc;
+}
+
+fn format(data: &Vec<u8>) -> Vec<u8> {
+    let mut packet: Vec<u8> = data.clone();
+    packet.resize(data.len() + 2, 0);
+
+    let mut i = 0;
+
+    for j in 0..data.len() {
+        packet[j + i] = data[j];
+        if j == 1 {
+            let length = data.len() + 4;
+            packet[2] = (length % 256) as u8;
+            packet[3] = (length / 256) as u8;
+            i = 2;
+        }
+    }
+
+    let crc = crc16(&packet);
+    packet.push(crc as u8);
+    packet.push((crc >> 8) as u8);
+
+    return packet;
 }
 
 #[tokio::main]
@@ -64,6 +87,7 @@ async fn main() -> Result<(), ()> {
     peripheral.discover_characteristics().await.unwrap();
     println!("service_data: {}", peripheral.properties().await.unwrap().unwrap().service_data.len());
     println!("services: {}", peripheral.properties().await.unwrap().unwrap().services.len());
+
     for service in peripheral.properties().await.unwrap().unwrap().services {
         println!("services: {}", service);
     }
@@ -85,15 +109,17 @@ async fn main() -> Result<(), ()> {
     let stream = peripheral.notifications().await.unwrap();
     let stream_closure = stream.for_each_concurrent(100, |ev| async move {
         println!("Message received: {:X?}", ev.value);
-        println!("- U8: {:X?}", u8asu16be([ev.value[ev.value.len()-2], ev.value[ev.value.len()-1]]));
-        println!("- CRC: {:X?}", crc16(&ev.value[..ev.value.len()-2]));
+        println!("- U8: {:X?}", u8asu16be([ev.value[ev.value.len() - 2], ev.value[ev.value.len() - 1]]));
+        println!("- CRC: {:X?}", crc16(&(&ev.value[..ev.value.len() - 2]).to_vec()));
     });
+
     println!("Subscribing to {}", sub_char.uuid);
     peripheral.subscribe(&sub_char).await.unwrap();
 
-    let message: Vec<u8> = vec![0x01, 0x06, 0x07, 0x00, 0x00, 0x54, 0x19];
+    let message: Vec<u8> = format(&vec![2, 3, 71, 80]);
     println!("Sending message {:X?}", message);
     peripheral.write(&cmd_char, &message, btleplug::api::WriteType::WithResponse).await.unwrap();
+
     thread::sleep(Duration::from_millis(200));
     stream_closure.await;
     Ok(())
